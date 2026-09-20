@@ -52,5 +52,22 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("Caveats:", text)
 
 
+class WindowsGpuParsingTests(unittest.TestCase):
+    def test_parse_wmic_video_controller_output_name_and_ram_columns(self):
+        output = (
+            "Name                               AdapterRAM\n"
+            "NVIDIA GeForce RTX 4090           25757220864\n"
+            "Intel(R) UHD Graphics             1073741824\n"
+        )
+        gpus = pcc.parse_wmic_video_controller_output(output)
+
+        self.assertEqual(len(gpus), 2)
+        self.assertEqual(gpus[0]["name"], "NVIDIA GeForce RTX 4090")
+        self.assertEqual(gpus[0]["vendor"], "NVIDIA")
+        self.assertEqual(gpus[0]["vram_bytes"], 25757220864)
+        self.assertEqual(gpus[1]["vendor"], "Intel")
+        self.assertEqual(gpus[1]["vram_bytes"], 1073741824)
+
+
 if __name__ == "__main__":
     unittest.main()

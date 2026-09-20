@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import glob
 import json
 import os
 import platform
@@ -96,7 +97,7 @@ def detect_total_ram_bytes(system: str) -> Optional[int]:
                 ("ullAvailPageFile", ctypes.c_ulonglong),
                 ("ullTotalVirtual", ctypes.c_ulonglong),
                 ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
             ]
 
         status = MEMORYSTATUSEX()
@@ -153,30 +154,143 @@ def bytes_to_gib(num_bytes: Optional[int]) -> float:
     return num_bytes / (1024 ** 3)
 
 
+def infer_vendor_from_name(name: str) -> str:
+    lowered = name.lower()
+    if "nvidia" in lowered:
+        return "NVIDIA"
+    if "amd" in lowered or "advanced micro devices" in lowered or "radeon" in lowered:
+        return "AMD"
+    if "intel" in lowered:
+        return "Intel"
+    return UNAVAILABLE
+
+
+def parse_wmic_video_controller_output(output: str) -> List[Dict[str, Any]]:
+    gpus: List[Dict[str, Any]] = []
+    if not output:
+        return gpus
+
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return gpus
+
+    header = lines[0]
+    lowered_header = header.lower()
+    if "name" not in lowered_header or "adapterram" not in lowered_header:
+        return gpus
+
+    name_idx = lowered_header.find("name")
+    ram_idx = lowered_header.find("adapterram")
+    if name_idx < 0 or ram_idx < 0:
+        return gpus
+
+    for line in lines[1:]:
+        if line.lower().strip() in {"name", "adapterram"}:
+            continue
+        match = re.match(r"^(.*?)(\d[\d,]*)\s*$", line.strip())
+        if match:
+            name_text = match.group(1).strip()
+            ram_text = match.group(2).strip()
+        elif ram_idx > name_idx:
+            name_text = line[name_idx:ram_idx].strip()
+            ram_text = line[ram_idx:].strip()
+        else:
+            ram_text = line[ram_idx:name_idx].strip()
+            name_text = line[name_idx:].strip()
+        if not name_text and not ram_text:
+            continue
+        ram_bytes = parse_bytes_from_text(ram_text)
+        name = name_text or UNAVAILABLE
+        gpus.append(
+            {
+                "vendor": infer_vendor_from_name(name),
+                "name": name,
+                "vram_bytes": ram_bytes,
+                "vram": bytes_to_human(ram_bytes),
+            }
+        )
+    return gpus
+
+
+def detect_linux_gpus_sysfs() -> List[Dict[str, Any]]:
+    gpus: List[Dict[str, Any]] = []
+    for card_path in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
+        device_path = os.path.join(card_path, "device")
+        vendor_path = os.path.join(device_path, "vendor")
+        class_path = os.path.join(device_path, "class")
+        uevent_path = os.path.join(device_path, "uevent")
+
+        try:
+            with open(class_path, "r", encoding="utf-8", errors="ignore") as handle:
+                class_code = handle.read().strip().lower()
+        except OSError:
+            continue
+
+        if not class_code.startswith("0x03"):
+            continue
+
+        vendor = UNAVAILABLE
+        try:
+            with open(vendor_path, "r", encoding="utf-8", errors="ignore") as handle:
+                vendor_id = handle.read().strip().lower()
+            vendor = {"0x10de": "NVIDIA", "0x1002": "AMD", "0x1022": "AMD", "0x8086": "Intel"}.get(vendor_id, UNAVAILABLE)
+        except OSError:
+            pass
+
+        name = UNAVAILABLE
+        try:
+            with open(uevent_path, "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if line.startswith("DRIVER="):
+                        name = line.split("=", 1)[1].strip() or UNAVAILABLE
+                        break
+        except OSError:
+            pass
+
+        gpus.append({"vendor": vendor, "name": name, "vram_bytes": None, "vram": UNAVAILABLE})
+
+    return gpus
+
+
+def update_linux_vram_from_nvidia_smi(gpus: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    output = run_command(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+    if not output:
+        return gpus
+
+    detected: List[Dict[str, Any]] = []
+    for line in output.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        parts = [part.strip() for part in text.split(",", 1)]
+        if len(parts) != 2:
+            continue
+        name = parts[0] or UNAVAILABLE
+        try:
+            vram_mb = float(parts[1])
+            vram_bytes = int(vram_mb * (1024 ** 2))
+        except ValueError:
+            vram_bytes = None
+        detected.append(
+            {
+                "vendor": infer_vendor_from_name(name),
+                "name": name,
+                "vram_bytes": vram_bytes,
+                "vram": bytes_to_human(vram_bytes),
+            }
+        )
+
+    if not detected:
+        return gpus
+    return detected
+
+
 def detect_gpus(system: str) -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
 
     if system == "Windows":
         output = run_command(["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM"])
-        if output:
-            for line in output.splitlines():
-                line = line.strip()
-                if not line or line.lower().startswith("adapterram"):
-                    continue
-                parts = line.split()
-                if not parts:
-                    continue
-                ram_bytes = parse_bytes_from_text(parts[0])
-                name = " ".join(parts[1:]).strip() if len(parts) > 1 else UNAVAILABLE
-                if not name:
-                    name = UNAVAILABLE
-                vendor = name.split()[0] if name != UNAVAILABLE else UNAVAILABLE
-                gpus.append({
-                    "vendor": vendor,
-                    "name": name,
-                    "vram_bytes": ram_bytes,
-                    "vram": bytes_to_human(ram_bytes),
-                })
+        gpus.extend(parse_wmic_video_controller_output(output))
 
     elif system == "Darwin":
         output = run_command(["system_profiler", "SPDisplaysDataType"])
@@ -219,19 +333,16 @@ def detect_gpus(system: str) -> List[Dict[str, Any]]:
                 if "vga" not in lowered and "3d controller" not in lowered and "display controller" not in lowered:
                     continue
                 details = text.split(":", 2)[-1].strip()
-                vendor = UNAVAILABLE
-                if "nvidia" in lowered:
-                    vendor = "NVIDIA"
-                elif "amd" in lowered or "advanced micro devices" in lowered or "radeon" in lowered:
-                    vendor = "AMD"
-                elif "intel" in lowered:
-                    vendor = "Intel"
+                vendor = infer_vendor_from_name(details)
                 gpus.append({
                     "vendor": vendor,
                     "name": details or UNAVAILABLE,
                     "vram_bytes": None,
                     "vram": UNAVAILABLE,
                 })
+        if not gpus:
+            gpus.extend(detect_linux_gpus_sysfs())
+        gpus = update_linux_vram_from_nvidia_smi(gpus)
 
     return gpus
 
