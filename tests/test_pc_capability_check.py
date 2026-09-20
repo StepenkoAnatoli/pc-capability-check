@@ -87,6 +87,27 @@ class WindowsGpuParsingTests(unittest.TestCase):
         self.assertEqual(gpus[0]["name"], "NVIDIA GeForce RTX 4090")
         self.assertEqual(gpus[0]["vram_bytes"], 25757220864)
 
+    @mock.patch("pc_capability_check.run_command")
+    def test_detect_gpus_windows_enriches_missing_wmic_vram(self, mock_run_command):
+        wmic_output = (
+            "Name                               AdapterRAM\n"
+            "NVIDIA GeForce RTX 4090\n"
+        )
+
+        def fake_run(cmd, timeout=3):
+            if cmd[:2] == ["wmic", "path"]:
+                return wmic_output
+            if cmd and cmd[0] == "powershell":
+                return '[{"Name":"NVIDIA GeForce RTX 4090","AdapterRAM":25757220864}]'
+            return ""
+
+        mock_run_command.side_effect = fake_run
+        gpus = pcc.detect_gpus("Windows")
+
+        self.assertEqual(len(gpus), 1)
+        self.assertEqual(gpus[0]["name"], "NVIDIA GeForce RTX 4090")
+        self.assertEqual(gpus[0]["vram_bytes"], 25757220864)
+
 
 class LinuxGpuDetectionTests(unittest.TestCase):
     @mock.patch("pc_capability_check.run_command")

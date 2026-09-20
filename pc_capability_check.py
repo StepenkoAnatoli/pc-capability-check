@@ -218,7 +218,7 @@ def parse_wmic_video_controller_output(output: str) -> List[Dict[str, Any]]:
     for line in lines[1:]:
         if line.lower().strip() in {"name", "adapterram"}:
             continue
-        match = re.match(r"^(.*?)(\d[\d,]*)\s*$", line.strip())
+        match = re.match(r"^(.*?\S)\s{2,}(\d[\d,]*)\s*$", line.strip())
         if match:
             name_text = match.group(1).strip()
             ram_text = match.group(2).strip()
@@ -273,6 +273,44 @@ def parse_powershell_video_controller_output(output: str) -> List[Dict[str, Any]
             }
         )
     return gpus
+
+
+def merge_windows_gpu_data(base: List[Dict[str, Any]], extra: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not extra:
+        return base
+    if not base:
+        return extra
+
+    merged = list(base)
+    used_extra = [False] * len(extra)
+
+    exact_index: Dict[str, int] = {}
+    loose_index: Dict[str, int] = {}
+    for idx, gpu in enumerate(merged):
+        exact_index[normalize_gpu_name(str(gpu.get("name", "")))] = idx
+        loose_index[normalize_gpu_match_key(str(gpu.get("name", "")))] = idx
+
+    for extra_idx, gpu in enumerate(extra):
+        exact_key = normalize_gpu_name(str(gpu.get("name", "")))
+        loose_key = normalize_gpu_match_key(str(gpu.get("name", "")))
+        target_idx = exact_index.get(exact_key)
+        if target_idx is None:
+            target_idx = loose_index.get(loose_key)
+        if target_idx is None:
+            continue
+        target = merged[target_idx]
+        if target.get("vram_bytes") is None and gpu.get("vram_bytes") is not None:
+            target["vram_bytes"] = gpu["vram_bytes"]
+            target["vram"] = gpu["vram"]
+        if target.get("vendor") in {None, "", UNAVAILABLE} and gpu.get("vendor"):
+            target["vendor"] = gpu["vendor"]
+        used_extra[extra_idx] = True
+
+    for index, gpu in enumerate(extra):
+        if not used_extra[index]:
+            merged.append(gpu)
+
+    return merged
 
 
 def detect_linux_gpus_sysfs() -> List[Dict[str, Any]]:
@@ -415,7 +453,8 @@ def detect_gpus(system: str) -> List[Dict[str, Any]]:
     if system == "Windows":
         output = run_command(["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM"])
         gpus.extend(parse_wmic_video_controller_output(output))
-        if not gpus:
+        needs_enrichment = (not gpus) or any(gpu.get("vram_bytes") is None for gpu in gpus)
+        if needs_enrichment:
             ps_output = run_command(
                 [
                     "powershell",
@@ -424,7 +463,8 @@ def detect_gpus(system: str) -> List[Dict[str, Any]]:
                     "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
                 ]
             )
-            gpus.extend(parse_powershell_video_controller_output(ps_output))
+            ps_gpus = parse_powershell_video_controller_output(ps_output)
+            gpus = merge_windows_gpu_data(gpus, ps_gpus)
 
     elif system == "Darwin":
         output = run_command(["system_profiler", "SPDisplaysDataType"])
