@@ -103,7 +103,10 @@ def detect_total_ram_bytes(system: str) -> Optional[int]:
         status = MEMORYSTATUSEX()
         status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
         try:
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            global_memory_status_ex = ctypes.windll.kernel32.GlobalMemoryStatusEx
+            global_memory_status_ex.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+            global_memory_status_ex.restype = ctypes.c_int
+            if global_memory_status_ex(ctypes.byref(status)):
                 return int(status.ullTotalPhys)
         except (AttributeError, OSError):
             return None
@@ -347,15 +350,23 @@ def update_linux_vram_from_nvidia_smi(gpus: List[Dict[str, Any]]) -> List[Dict[s
 
     merged = list(gpus)
     used_detected: List[bool] = [False] * len(detected)
-    detected_by_name = {normalize_gpu_name(item["name"]): idx for idx, item in enumerate(detected) if item.get("name")}
+    detected_by_name: Dict[str, List[int]] = {}
+    for idx, item in enumerate(detected):
+        key = normalize_gpu_name(item.get("name", ""))
+        if not key:
+            continue
+        detected_by_name.setdefault(key, []).append(idx)
 
     for gpu in merged:
         if gpu.get("vendor") != "NVIDIA":
             continue
         name_key = normalize_gpu_name(str(gpu.get("name", "")))
-        matched_index = detected_by_name.get(name_key)
-        if matched_index is None or used_detected[matched_index]:
+        index_pool = detected_by_name.get(name_key, [])
+        while index_pool and used_detected[index_pool[0]]:
+            index_pool.pop(0)
+        if not index_pool:
             continue
+        matched_index = index_pool.pop(0)
         detected_gpu = detected[matched_index]
         gpu["name"] = detected_gpu["name"]
         gpu["vram_bytes"] = detected_gpu["vram_bytes"]

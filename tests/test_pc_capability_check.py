@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+import io
 
 import pc_capability_check as pcc
 
@@ -165,6 +166,54 @@ class LinuxGpuDetectionTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["name"], "NVIDIA GeForce RTX 4090")
         self.assertEqual(merged[0]["vram_bytes"], 24564 * 1024**2)
+
+    @mock.patch("pc_capability_check.run_command")
+    def test_nvidia_smi_merge_handles_duplicate_gpu_names(self, mock_run_command):
+        mock_run_command.return_value = (
+            "NVIDIA GeForce RTX 4090, 24564\n"
+            "NVIDIA GeForce RTX 4090, 24564\n"
+        )
+        existing = [
+            {"vendor": "NVIDIA", "name": "NVIDIA GeForce RTX 4090", "vram_bytes": None, "vram": pcc.UNAVAILABLE},
+            {"vendor": "NVIDIA", "name": "NVIDIA GeForce RTX 4090", "vram_bytes": None, "vram": pcc.UNAVAILABLE},
+        ]
+
+        merged = pcc.update_linux_vram_from_nvidia_smi(existing)
+
+        self.assertEqual(len(merged), 2)
+        self.assertIsNotNone(merged[0]["vram_bytes"])
+        self.assertIsNotNone(merged[1]["vram_bytes"])
+
+
+class CliMainTests(unittest.TestCase):
+    @mock.patch("pc_capability_check.collect_system_report")
+    def test_main_outputs_human_readable_by_default(self, mock_collect):
+        mock_collect.return_value = {
+            "platform": {"system": "Linux", "release": "x", "version": "x", "machine": "x86_64", "platform": "Linux-x"},
+            "cpu": {"model": "CPU", "logical_cores": 4},
+            "memory": {"total": "16.00 GB", "total_bytes": 16 * 1024**3},
+            "disk": {"total": "100.00 GB", "free": "50.00 GB", "total_bytes": 100 * 1024**3, "free_bytes": 50 * 1024**3},
+            "gpu": {"detected": False, "count": 0, "gpus": []},
+            "llm_capability": {
+                "mode": "CPU-only or unknown GPU VRAM",
+                "inference": "Limited local inference; focus on tiny models (<3B)",
+                "finetuning": "Local fine-tuning generally not recommended without a capable GPU",
+                "recommendations": ["Use small quantized models."],
+                "caveats": ["Heuristic only."],
+            },
+        }
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:
+            exit_code = pcc.main([])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("System Summary", fake_stdout.getvalue())
+
+    @mock.patch("pc_capability_check.collect_system_report")
+    def test_main_outputs_json_with_flag(self, mock_collect):
+        mock_collect.return_value = {"platform": {"system": "Linux"}}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:
+            exit_code = pcc.main(["--json"])
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"platform"', fake_stdout.getvalue())
 
 
 if __name__ == "__main__":
