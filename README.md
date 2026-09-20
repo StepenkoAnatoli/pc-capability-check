@@ -8,7 +8,7 @@ Small Windows-focused utility to report PC hardware and estimate local LLM infer
 - Python 3.x
 - No third-party Python packages required
 
-### Run (human-readable output)
+###open the folder file with terminal then run.
 
 ```bash
 python pc_capability_check.py
