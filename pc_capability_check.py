@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""Cross-platform PC capability checker for local LLM workloads."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+from typing import Any, Dict, List, Optional
+
+
+UNAVAILABLE = "Unavailable"
+
+
+def run_command(command: List[str], timeout: int = 3) -> str:
+    """Run a command and return stdout text, or an empty string on failure."""
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def detect_cpu_model(system: str) -> str:
+    model = platform.processor().strip()
+    if model:
+        return model
+
+    if system == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if line.lower().startswith("model name"):
+                        _, _, value = line.partition(":")
+                        candidate = value.strip()
+                        if candidate:
+                            return candidate
+        except OSError:
+            pass
+    elif system == "Darwin":
+        model = run_command(["sysctl", "-n", "machdep.cpu.brand_string"])
+        if model:
+            return model
+    elif system == "Windows":
+        model = run_command(["wmic", "cpu", "get", "Name"])
+        if model:
+            lines = [line.strip() for line in model.splitlines() if line.strip() and line.strip().lower() != "name"]
+            if lines:
+                return lines[0]
+        env_model = os.environ.get("PROCESSOR_IDENTIFIER", "").strip()
+        if env_model:
+            return env_model
+
+    return UNAVAILABLE
+
+
+def detect_total_ram_bytes(system: str) -> Optional[int]:
+    if system == "Linux":
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if line.startswith("MemTotal:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return int(parts[1]) * 1024
+        except (OSError, ValueError):
+            return None
+
+    if system == "Darwin":
+        output = run_command(["sysctl", "-n", "hw.memsize"])
+        if output.isdigit():
+            return int(output)
+
+    if system == "Windows":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        except (AttributeError, OSError):
+            return None
+
+    return None
+
+
+def detect_disk_bytes() -> Dict[str, Optional[int]]:
+    try:
+        usage = shutil.disk_usage(os.path.abspath(os.sep))
+        return {"total": int(usage.total), "free": int(usage.free)}
+    except OSError:
+        return {"total": None, "free": None}
+
+
+def parse_bytes_from_text(value: str) -> Optional[int]:
+    if not value:
+        return None
+    cleaned = value.replace(",", "").strip()
+    match = re.search(r"(\d+)", cleaned)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def bytes_to_human(num_bytes: Optional[int]) -> str:
+    if num_bytes is None:
+        return UNAVAILABLE
+    if num_bytes < 0:
+        return UNAVAILABLE
+    value = float(num_bytes)
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024.0
+        index += 1
+    if index == 0:
+        return f"{int(value)} {units[index]}"
+    return f"{value:.2f} {units[index]}"
+
+
+def bytes_to_gib(num_bytes: Optional[int]) -> float:
+    if num_bytes is None:
+        return 0.0
+    return num_bytes / (1024 ** 3)
+
+
+def detect_gpus(system: str) -> List[Dict[str, Any]]:
+    gpus: List[Dict[str, Any]] = []
+
+    if system == "Windows":
+        output = run_command(["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM"])
+        if output:
+            for line in output.splitlines():
+                line = line.strip()
+                if not line or line.lower().startswith("adapterram"):
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                ram_bytes = parse_bytes_from_text(parts[0])
+                name = " ".join(parts[1:]).strip() if len(parts) > 1 else UNAVAILABLE
+                if not name:
+                    name = UNAVAILABLE
+                vendor = name.split()[0] if name != UNAVAILABLE else UNAVAILABLE
+                gpus.append({
+                    "vendor": vendor,
+                    "name": name,
+                    "vram_bytes": ram_bytes,
+                    "vram": bytes_to_human(ram_bytes),
+                })
+
+    elif system == "Darwin":
+        output = run_command(["system_profiler", "SPDisplaysDataType"])
+        if output:
+            blocks = output.split("\n\n")
+            for block in blocks:
+                name = UNAVAILABLE
+                vendor = UNAVAILABLE
+                vram_bytes: Optional[int] = None
+                for raw_line in block.splitlines():
+                    line = raw_line.strip()
+                    if line.startswith("Chipset Model:"):
+                        name = line.split(":", 1)[1].strip() or UNAVAILABLE
+                    elif line.startswith("Vendor:"):
+                        vendor = line.split(":", 1)[1].strip() or UNAVAILABLE
+                    elif line.startswith("VRAM"):
+                        size_text = line.split(":", 1)[1].strip() if ":" in line else ""
+                        match = re.search(r"(\d+(?:\.\d+)?)\s*(GB|MB)", size_text, re.IGNORECASE)
+                        if match:
+                            amount = float(match.group(1))
+                            unit = match.group(2).upper()
+                            if unit == "GB":
+                                vram_bytes = int(amount * (1024 ** 3))
+                            else:
+                                vram_bytes = int(amount * (1024 ** 2))
+                if name != UNAVAILABLE or vendor != UNAVAILABLE:
+                    gpus.append({
+                        "vendor": vendor,
+                        "name": name,
+                        "vram_bytes": vram_bytes,
+                        "vram": bytes_to_human(vram_bytes),
+                    })
+
+    elif system == "Linux":
+        output = run_command(["lspci"])
+        if output:
+            for line in output.splitlines():
+                text = line.strip()
+                lowered = text.lower()
+                if "vga" not in lowered and "3d controller" not in lowered and "display controller" not in lowered:
+                    continue
+                details = text.split(":", 2)[-1].strip()
+                vendor = UNAVAILABLE
+                if "nvidia" in lowered:
+                    vendor = "NVIDIA"
+                elif "amd" in lowered or "advanced micro devices" in lowered or "radeon" in lowered:
+                    vendor = "AMD"
+                elif "intel" in lowered:
+                    vendor = "Intel"
+                gpus.append({
+                    "vendor": vendor,
+                    "name": details or UNAVAILABLE,
+                    "vram_bytes": None,
+                    "vram": UNAVAILABLE,
+                })
+
+    return gpus
+
+
+def estimate_llm_capability(total_ram_bytes: Optional[int], gpus: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total_ram_gib = bytes_to_gib(total_ram_bytes)
+    gpu_vram_gib = [bytes_to_gib(gpu.get("vram_bytes")) for gpu in gpus if gpu.get("vram_bytes") is not None]
+    max_gpu_vram_gib = max(gpu_vram_gib) if gpu_vram_gib else 0.0
+
+    recommendations: List[str] = []
+
+    if max_gpu_vram_gib >= 48:
+        mode = "GPU-accelerated"
+        inference = "Strong local inference: 13B/34B comfortable; 70B possible with quantization/offload"
+        finetuning = "QLoRA: 13B practical; 7B comfortable. Full fine-tuning remains expensive"
+        recommendations.extend(
+            [
+                "Use 4-bit or 8-bit quantization for larger models.",
+                "Consider 70B only with careful quantization, batch size control, and patience.",
+            ]
+        )
+    elif max_gpu_vram_gib >= 24:
+        mode = "GPU-accelerated"
+        inference = "Good local inference: 7B/13B comfortable; larger models require aggressive quantization"
+        finetuning = "QLoRA: 7B practical; 13B possible with tight settings"
+        recommendations.extend(
+            [
+                "Prefer 7B/13B instruction-tuned models for reliable latency.",
+                "Use gradient checkpointing and small batch sizes for QLoRA.",
+            ]
+        )
+    elif max_gpu_vram_gib >= 12:
+        mode = "GPU-accelerated"
+        inference = "Entry-to-mid GPU inference: 3B/7B strong; 13B possible with 4-bit quantization"
+        finetuning = "QLoRA: mostly 3B/7B with conservative settings"
+        recommendations.extend(
+            [
+                "Use 4-bit quantization and smaller context windows for stability.",
+                "Target 3B/7B models for best usability.",
+            ]
+        )
+    elif max_gpu_vram_gib >= 6:
+        mode = "GPU-limited"
+        inference = "Small-model GPU inference: up to 3B/7B (quantized)"
+        finetuning = "Fine-tuning is limited; tiny QLoRA experiments only"
+        recommendations.extend(
+            [
+                "Focus on 3B models or heavily-quantized 7B models.",
+                "Expect trade-offs in context length and response speed.",
+            ]
+        )
+    else:
+        mode = "CPU-only or unknown GPU VRAM"
+        if total_ram_gib >= 64:
+            inference = "CPU inference feasible for 7B; 13B may work slowly with quantization"
+        elif total_ram_gib >= 32:
+            inference = "CPU inference suitable for 3B/7B with quantization; expect slow throughput"
+        elif total_ram_gib >= 16:
+            inference = "CPU inference mostly for 1B/3B-class models"
+        else:
+            inference = "Limited local inference; focus on tiny models (<3B)"
+        finetuning = "Local fine-tuning generally not recommended without a capable GPU"
+        recommendations.extend(
+            [
+                "If possible, add or upgrade a discrete GPU for significantly better results.",
+                "For CPU-only setups, prioritize smaller quantized models.",
+            ]
+        )
+
+    caveats = [
+        "These are conservative estimates, not guarantees.",
+        "Actual usability depends on model architecture, quantization, context length, and software stack.",
+        "Integrated GPUs and shared memory can vary significantly in real performance.",
+    ]
+
+    return {
+        "mode": mode,
+        "inference": inference,
+        "finetuning": finetuning,
+        "recommended_model_classes": ["3B", "7B", "13B", "70B"],
+        "max_detected_gpu_vram_gib": round(max_gpu_vram_gib, 2),
+        "total_ram_gib": round(total_ram_gib, 2) if total_ram_bytes is not None else None,
+        "recommendations": recommendations,
+        "caveats": caveats,
+    }
+
+
+def collect_system_report() -> Dict[str, Any]:
+    system = platform.system() or UNAVAILABLE
+    disk = detect_disk_bytes()
+    gpus = detect_gpus(system)
+
+    report = {
+        "platform": {
+            "system": system,
+            "release": platform.release() or UNAVAILABLE,
+            "version": platform.version() or UNAVAILABLE,
+            "machine": platform.machine() or UNAVAILABLE,
+            "platform": platform.platform() or UNAVAILABLE,
+        },
+        "cpu": {
+            "model": detect_cpu_model(system),
+            "logical_cores": os.cpu_count() if os.cpu_count() is not None else UNAVAILABLE,
+        },
+        "memory": {
+            "total_bytes": detect_total_ram_bytes(system),
+        },
+        "disk": {
+            "total_bytes": disk["total"],
+            "free_bytes": disk["free"],
+        },
+        "gpu": {
+            "detected": bool(gpus),
+            "count": len(gpus),
+            "gpus": gpus,
+        },
+    }
+
+    report["memory"]["total"] = bytes_to_human(report["memory"]["total_bytes"])
+    report["disk"]["total"] = bytes_to_human(report["disk"]["total_bytes"])
+    report["disk"]["free"] = bytes_to_human(report["disk"]["free_bytes"])
+    report["llm_capability"] = estimate_llm_capability(report["memory"]["total_bytes"], gpus)
+
+    return report
+
+
+def format_human_report(report: Dict[str, Any]) -> str:
+    platform_info = report["platform"]
+    cpu = report["cpu"]
+    memory = report["memory"]
+    disk = report["disk"]
+    gpu = report["gpu"]
+    llm = report["llm_capability"]
+
+    lines = [
+        "System Summary",
+        "==============",
+        f"OS: {platform_info['system']} {platform_info['release']} ({platform_info['machine']})",
+        f"Platform: {platform_info['platform']}",
+        f"CPU: {cpu['model']}",
+        f"Logical cores: {cpu['logical_cores']}",
+        f"Total RAM: {memory['total']}",
+        f"Disk (root/system): {disk['total']} total, {disk['free']} free",
+    ]
+
+    if gpu["detected"]:
+        lines.append("GPU(s):")
+        for index, item in enumerate(gpu["gpus"], start=1):
+            lines.append(
+                f"  {index}. {item.get('vendor', UNAVAILABLE)} | {item.get('name', UNAVAILABLE)} | VRAM: {item.get('vram', UNAVAILABLE)}"
+            )
+    else:
+        lines.append("GPU(s): Unavailable or not detected")
+
+    lines.extend(
+        [
+            "",
+            "LLM Capability Estimate",
+            "=======================",
+            f"Mode: {llm['mode']}",
+            f"Inference: {llm['inference']}",
+            f"Fine-tuning/QLoRA: {llm['finetuning']}",
+            "",
+            "Recommendations:",
+        ]
+    )
+
+    for recommendation in llm["recommendations"]:
+        lines.append(f"- {recommendation}")
+
+    lines.append("")
+    lines.append("Caveats:")
+    for caveat in llm["caveats"]:
+        lines.append(f"- {caveat}")
+
+    return "\n".join(lines)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Report hardware capabilities and estimate local LLM inference/fine-tuning suitability "
+            "(conservative heuristic guidance)."
+        )
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output.",
+    )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        report = collect_system_report()
+    except Exception as exc:  # pragma: no cover
+        print(f"Fatal error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_human_report(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
