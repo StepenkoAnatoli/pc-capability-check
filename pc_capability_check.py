@@ -607,8 +607,12 @@ def estimate_llm_capability(total_ram_bytes: Optional[int], gpus: List[Dict[str,
 
 def collect_system_report() -> Dict[str, Any]:
     system = platform.system() or UNAVAILABLE
-    disk = detect_disk_bytes(system)
-    gpus = detect_gpus(system)
+    windows_supported = system == "Windows"
+    disk = detect_disk_bytes(system) if windows_supported else {"total": None, "free": None}
+    gpus = detect_gpus(system) if windows_supported else []
+    total_ram_bytes = detect_total_ram_bytes(system) if windows_supported else None
+    cpu_model = detect_cpu_model(system) if windows_supported else UNAVAILABLE
+    logical_cores = os.cpu_count() if windows_supported and os.cpu_count() is not None else UNAVAILABLE
 
     report = {
         "platform": {
@@ -619,11 +623,11 @@ def collect_system_report() -> Dict[str, Any]:
             "platform": platform.platform() or UNAVAILABLE,
         },
         "cpu": {
-            "model": detect_cpu_model(system),
-            "logical_cores": os.cpu_count() if os.cpu_count() is not None else UNAVAILABLE,
+            "model": cpu_model,
+            "logical_cores": logical_cores,
         },
         "memory": {
-            "total_bytes": detect_total_ram_bytes(system),
+            "total_bytes": total_ram_bytes,
         },
         "disk": {
             "total_bytes": disk["total"],
@@ -633,6 +637,15 @@ def collect_system_report() -> Dict[str, Any]:
             "detected": bool(gpus),
             "count": len(gpus),
             "gpus": gpus,
+        },
+        "support": {
+            "windows_only": True,
+            "supported_host": windows_supported,
+            "message": (
+                "This build is Windows-only. Non-Windows hosts return unavailable hardware fields."
+                if not windows_supported
+                else "Windows host detected."
+            ),
         },
     }
 
@@ -662,6 +675,9 @@ def format_human_report(report: Dict[str, Any]) -> str:
         f"Total RAM: {memory['total']}",
         f"Disk (root/system): {disk['total']} total, {disk['free']} free",
     ]
+    support = report.get("support", {})
+    if support.get("windows_only"):
+        lines.append(f"Support: {support.get('message', UNAVAILABLE)}")
 
     if gpu["detected"]:
         lines.append("GPU(s):")
@@ -699,8 +715,8 @@ def format_human_report(report: Dict[str, Any]) -> str:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Report hardware capabilities and estimate local LLM inference/fine-tuning suitability "
-            "(conservative heuristic guidance)."
+            "Report Windows PC hardware capabilities and estimate local LLM inference/fine-tuning "
+            "suitability (conservative heuristic guidance)."
         )
     )
     parser.add_argument(

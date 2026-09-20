@@ -1,6 +1,6 @@
 # pc-capability-check
 
-Small cross-platform utility to report PC hardware and estimate local LLM inference and fine-tuning suitability.
+Small Windows-focused utility to report PC hardware and estimate local LLM inference and fine-tuning suitability.
 
 ## Quick start
 
@@ -28,24 +28,25 @@ python pc_capability_check.py --help
 
 ## Supported operating systems
 
-- Linux
-- macOS
 - Windows
 
-The tool attempts OS-specific hardware discovery and degrades gracefully if a field cannot be detected.
+This build is **Windows-only**.  
+If run on non-Windows hosts, the tool degrades gracefully and labels Windows-specific hardware fields as unavailable.
 
 ## Example output (human-readable)
 
 ```text
 System Summary
 ==============
-OS: Linux 6.8.0-1024-azure (x86_64)
-Platform: Linux-6.8.0-1024-azure-x86_64-with-glibc2.39
-CPU: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
-Logical cores: 2
-Total RAM: 6.75 GB
-Disk (root/system): 13.58 GB total, 12.90 GB free
-GPU(s): Unavailable or not detected
+OS: Windows 11 (AMD64)
+Platform: Windows-11-10.0.22631-SP0
+CPU: 13th Gen Intel(R) Core(TM) i7-13700H
+Logical cores: 20
+Total RAM: 31.72 GB
+Disk (root/system): 953.87 GB total, 614.42 GB free
+Support: Windows host detected.
+GPU(s):
+  1. NVIDIA | NVIDIA GeForce RTX 4070 Laptop GPU | VRAM: 8.00 GB
 
 LLM Capability Estimate
 =======================
@@ -98,8 +99,8 @@ Approximate model classes used in guidance: **3B / 7B / 13B / 70B**.
 
 ## Limitations
 
-- Hardware APIs vary by OS; some environments (minimal containers/VMs) expose limited information.
-- Linux GPU VRAM is often unavailable without vendor tooling.
+- Hardware APIs and command availability vary across Windows versions/configurations.
+- On non-Windows hosts, hardware fields are intentionally marked unavailable in this Windows-only build.
 - Reported suitability is conservative and should not be treated as a guarantee.
 
 ## Privacy
@@ -108,6 +109,6 @@ All checks run locally on your machine. The script does not send hardware detail
 
 ## Troubleshooting
 
-- If GPU fields are unavailable, verify OS-level tooling exists (`lspci`/`nvidia-smi` on Linux, `system_profiler` on macOS). On Windows, modern systems may not ship `wmic`; this tool then attempts a PowerShell/CIM fallback, but some environments may still report `Unavailable`.
-- If running in a VM/container, some hardware data may be hidden by the host.
+- If GPU fields are unavailable on Windows, `wmic` may be missing; this tool attempts a PowerShell/CIM fallback.
+- If running in a VM, some hardware data may be hidden by the host.
 - Use `--json` to integrate with automation and inspect raw detected fields.
