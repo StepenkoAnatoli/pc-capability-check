@@ -226,7 +226,7 @@ def parse_wmic_video_controller_output(output: str) -> List[Dict[str, Any]]:
 
 def detect_linux_gpus_sysfs() -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
-    for card_path in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
+    for card_path in sorted(glob.glob("/sys/class/drm/card*")):
         if not re.fullmatch(r"card\d+", os.path.basename(card_path)):
             continue
         device_path = os.path.join(card_path, "device")
