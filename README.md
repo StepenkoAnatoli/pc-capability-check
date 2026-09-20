@@ -108,6 +108,6 @@ All checks run locally on your machine. The script does not send hardware detail
 
 ## Troubleshooting
 
-- If GPU fields are unavailable, verify OS-level tooling exists (`lspci`/`nvidia-smi` on Linux, `system_profiler` on macOS). On Windows, modern systems may not ship `wmic`; in that case some CPU/GPU fields can fall back to `Unavailable`.
+- If GPU fields are unavailable, verify OS-level tooling exists (`lspci`/`nvidia-smi` on Linux, `system_profiler` on macOS). On Windows, modern systems may not ship `wmic`; this tool then attempts a PowerShell/CIM fallback, but some environments may still report `Unavailable`.
 - If running in a VM/container, some hardware data may be hidden by the host.
 - Use `--json` to integrate with automation and inspect raw detected fields.

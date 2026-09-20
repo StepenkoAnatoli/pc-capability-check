@@ -111,9 +111,13 @@ def detect_total_ram_bytes(system: str) -> Optional[int]:
     return None
 
 
-def detect_disk_bytes() -> Dict[str, Optional[int]]:
+def detect_disk_bytes(system: str) -> Dict[str, Optional[int]]:
+    root_path = os.path.abspath(os.sep)
+    if system == "Windows":
+        system_drive = os.environ.get("SystemDrive", "C:").strip() or "C:"
+        root_path = f"{system_drive}\\"
     try:
-        usage = shutil.disk_usage(os.path.abspath(os.sep))
+        usage = shutil.disk_usage(root_path)
         return {"total": int(usage.total), "free": int(usage.free)}
     except OSError:
         return {"total": None, "free": None}
@@ -225,6 +229,38 @@ def parse_wmic_video_controller_output(output: str) -> List[Dict[str, Any]]:
             continue
         ram_bytes = parse_bytes_from_text(ram_text)
         name = name_text or UNAVAILABLE
+        gpus.append(
+            {
+                "vendor": infer_vendor_from_name(name),
+                "name": name,
+                "vram_bytes": ram_bytes,
+                "vram": bytes_to_human(ram_bytes),
+            }
+        )
+    return gpus
+
+
+def parse_powershell_video_controller_output(output: str) -> List[Dict[str, Any]]:
+    gpus: List[Dict[str, Any]] = []
+    if not output:
+        return gpus
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return gpus
+
+    entries: List[Dict[str, Any]]
+    if isinstance(payload, dict):
+        entries = [payload]
+    elif isinstance(payload, list):
+        entries = [item for item in payload if isinstance(item, dict)]
+    else:
+        return gpus
+
+    for item in entries:
+        name = str(item.get("Name", "")).strip() or UNAVAILABLE
+        ram_value = item.get("AdapterRAM")
+        ram_bytes = parse_bytes_from_text(str(ram_value)) if ram_value is not None else None
         gpus.append(
             {
                 "vendor": infer_vendor_from_name(name),
@@ -368,6 +404,16 @@ def detect_gpus(system: str) -> List[Dict[str, Any]]:
     if system == "Windows":
         output = run_command(["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM"])
         gpus.extend(parse_wmic_video_controller_output(output))
+        if not gpus:
+            ps_output = run_command(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
+                ]
+            )
+            gpus.extend(parse_powershell_video_controller_output(ps_output))
 
     elif system == "Darwin":
         output = run_command(["system_profiler", "SPDisplaysDataType"])
@@ -510,7 +556,7 @@ def estimate_llm_capability(total_ram_bytes: Optional[int], gpus: List[Dict[str,
 
 def collect_system_report() -> Dict[str, Any]:
     system = platform.system() or UNAVAILABLE
-    disk = detect_disk_bytes()
+    disk = detect_disk_bytes(system)
     gpus = detect_gpus(system)
 
     report = {
