@@ -282,7 +282,27 @@ def update_linux_vram_from_nvidia_smi(gpus: List[Dict[str, Any]]) -> List[Dict[s
 
     if not detected:
         return gpus
-    return detected
+
+    merged = list(gpus)
+    used_detected: List[bool] = [False] * len(detected)
+
+    for gpu in merged:
+        if gpu.get("vendor") != "NVIDIA":
+            continue
+        for index, detected_gpu in enumerate(detected):
+            if used_detected[index]:
+                continue
+            gpu["name"] = detected_gpu["name"]
+            gpu["vram_bytes"] = detected_gpu["vram_bytes"]
+            gpu["vram"] = detected_gpu["vram"]
+            used_detected[index] = True
+            break
+
+    for index, detected_gpu in enumerate(detected):
+        if not used_detected[index]:
+            merged.append(detected_gpu)
+
+    return merged
 
 
 def detect_gpus(system: str) -> List[Dict[str, Any]]:
