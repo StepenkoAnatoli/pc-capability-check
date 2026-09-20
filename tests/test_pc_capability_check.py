@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import pc_capability_check as pcc
 
@@ -67,6 +68,68 @@ class WindowsGpuParsingTests(unittest.TestCase):
         self.assertEqual(gpus[0]["vram_bytes"], 25757220864)
         self.assertEqual(gpus[1]["vendor"], "Intel")
         self.assertEqual(gpus[1]["vram_bytes"], 1073741824)
+
+
+class LinuxGpuDetectionTests(unittest.TestCase):
+    @mock.patch("pc_capability_check.run_command")
+    def test_detect_linux_gpus_from_lspci(self, mock_run_command):
+        def fake_run(cmd, timeout=3):
+            if cmd == ["lspci"]:
+                return "00:02.0 VGA compatible controller: Intel Corporation UHD Graphics"
+            if cmd and cmd[0] == "nvidia-smi":
+                return ""
+            return ""
+
+        mock_run_command.side_effect = fake_run
+        gpus = pcc.detect_gpus("Linux")
+
+        self.assertEqual(len(gpus), 1)
+        self.assertEqual(gpus[0]["vendor"], "Intel")
+        self.assertIn("UHD Graphics", gpus[0]["name"])
+
+    @mock.patch("pc_capability_check.open", create=True)
+    @mock.patch("pc_capability_check.glob.glob")
+    def test_sysfs_fallback_ignores_connector_paths(self, mock_glob, mock_open):
+        mock_glob.return_value = ["/sys/class/drm/card0", "/sys/class/drm/card0-DP-1"]
+
+        file_data = {
+            "/sys/class/drm/card0/device/class": "0x030000",
+            "/sys/class/drm/card0/device/vendor": "0x10de",
+            "/sys/class/drm/card0/device/uevent": "DRIVER=nvidia\n",
+        }
+
+        def fake_open(path, *args, **kwargs):
+            if path in file_data:
+                return mock.mock_open(read_data=file_data[path])()
+            raise OSError("missing")
+
+        mock_open.side_effect = fake_open
+        gpus = pcc.detect_linux_gpus_sysfs()
+
+        self.assertEqual(len(gpus), 1)
+        self.assertEqual(gpus[0]["vendor"], "NVIDIA")
+        self.assertEqual(gpus[0]["name"], "nvidia")
+
+    @mock.patch("pc_capability_check.run_command")
+    def test_nvidia_smi_merge_matches_by_name(self, mock_run_command):
+        mock_run_command.return_value = (
+            "NVIDIA GeForce RTX 3090, 24576\n"
+            "NVIDIA GeForce RTX 4090, 24564\n"
+        )
+        existing = [
+            {"vendor": "NVIDIA", "name": "NVIDIA GeForce RTX 4090", "vram_bytes": None, "vram": pcc.UNAVAILABLE},
+            {"vendor": "NVIDIA", "name": "NVIDIA GeForce RTX 3090", "vram_bytes": None, "vram": pcc.UNAVAILABLE},
+            {"vendor": "Intel", "name": "Intel UHD", "vram_bytes": None, "vram": pcc.UNAVAILABLE},
+        ]
+
+        merged = pcc.update_linux_vram_from_nvidia_smi(existing)
+
+        self.assertEqual(len(merged), 3)
+        self.assertEqual(merged[0]["name"], "NVIDIA GeForce RTX 4090")
+        self.assertEqual(merged[0]["vram_bytes"], 24564 * 1024**2)
+        self.assertEqual(merged[1]["name"], "NVIDIA GeForce RTX 3090")
+        self.assertEqual(merged[1]["vram_bytes"], 24576 * 1024**2)
+        self.assertEqual(merged[2]["vendor"], "Intel")
 
 
 if __name__ == "__main__":

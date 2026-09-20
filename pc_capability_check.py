@@ -165,6 +165,18 @@ def infer_vendor_from_name(name: str) -> str:
     return UNAVAILABLE
 
 
+def normalize_gpu_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def normalize_vendor_text(vendor_text: str) -> str:
+    normalized = infer_vendor_from_name(vendor_text)
+    if normalized != UNAVAILABLE:
+        return normalized
+    cleaned = vendor_text.split("(", 1)[0].strip()
+    return cleaned or UNAVAILABLE
+
+
 def parse_wmic_video_controller_output(output: str) -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
     if not output:
@@ -215,6 +227,8 @@ def parse_wmic_video_controller_output(output: str) -> List[Dict[str, Any]]:
 def detect_linux_gpus_sysfs() -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
     for card_path in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
+        if not re.fullmatch(r"card\d+", os.path.basename(card_path)):
+            continue
         device_path = os.path.join(card_path, "device")
         vendor_path = os.path.join(device_path, "vendor")
         class_path = os.path.join(device_path, "class")
@@ -285,18 +299,20 @@ def update_linux_vram_from_nvidia_smi(gpus: List[Dict[str, Any]]) -> List[Dict[s
 
     merged = list(gpus)
     used_detected: List[bool] = [False] * len(detected)
+    detected_by_name = {normalize_gpu_name(item["name"]): idx for idx, item in enumerate(detected) if item.get("name")}
 
     for gpu in merged:
         if gpu.get("vendor") != "NVIDIA":
             continue
-        for index, detected_gpu in enumerate(detected):
-            if used_detected[index]:
-                continue
-            gpu["name"] = detected_gpu["name"]
-            gpu["vram_bytes"] = detected_gpu["vram_bytes"]
-            gpu["vram"] = detected_gpu["vram"]
-            used_detected[index] = True
-            break
+        name_key = normalize_gpu_name(str(gpu.get("name", "")))
+        matched_index = detected_by_name.get(name_key)
+        if matched_index is None or used_detected[matched_index]:
+            continue
+        detected_gpu = detected[matched_index]
+        gpu["name"] = detected_gpu["name"]
+        gpu["vram_bytes"] = detected_gpu["vram_bytes"]
+        gpu["vram"] = detected_gpu["vram"]
+        used_detected[matched_index] = True
 
     for index, detected_gpu in enumerate(detected):
         if not used_detected[index]:
@@ -325,7 +341,8 @@ def detect_gpus(system: str) -> List[Dict[str, Any]]:
                     if line.startswith("Chipset Model:"):
                         name = line.split(":", 1)[1].strip() or UNAVAILABLE
                     elif line.startswith("Vendor:"):
-                        vendor = line.split(":", 1)[1].strip() or UNAVAILABLE
+                        vendor_text = line.split(":", 1)[1].strip()
+                        vendor = normalize_vendor_text(vendor_text)
                     elif line.startswith("VRAM"):
                         size_text = line.split(":", 1)[1].strip() if ":" in line else ""
                         match = re.search(r"(\d+(?:\.\d+)?)\s*(GB|MB)", size_text, re.IGNORECASE)
