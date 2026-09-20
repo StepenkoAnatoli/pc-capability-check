@@ -131,6 +131,24 @@ class LinuxGpuDetectionTests(unittest.TestCase):
         self.assertEqual(merged[1]["vram_bytes"], 24576 * 1024**2)
         self.assertEqual(merged[2]["vendor"], "Intel")
 
+    @mock.patch("pc_capability_check.run_command")
+    def test_nvidia_smi_merge_handles_lspci_style_name(self, mock_run_command):
+        mock_run_command.return_value = "NVIDIA GeForce RTX 4090, 24564\n"
+        existing = [
+            {
+                "vendor": "NVIDIA",
+                "name": "VGA compatible controller: NVIDIA Corporation AD102 [GeForce RTX 4090] (rev a1)",
+                "vram_bytes": None,
+                "vram": pcc.UNAVAILABLE,
+            }
+        ]
+
+        merged = pcc.update_linux_vram_from_nvidia_smi(existing)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["name"], "NVIDIA GeForce RTX 4090")
+        self.assertEqual(merged[0]["vram_bytes"], 24564 * 1024**2)
+
 
 if __name__ == "__main__":
     unittest.main()

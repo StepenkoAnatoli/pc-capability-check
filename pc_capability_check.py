@@ -169,6 +169,18 @@ def normalize_gpu_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip()).lower()
 
 
+def normalize_gpu_match_key(name: str) -> str:
+    text = normalize_gpu_name(name)
+    if ":" in text and ("controller" in text or "display" in text):
+        text = text.split(":", 1)[1].strip()
+    text = text.replace("nvidia corporation", " ")
+    text = text.replace("nvidia", " ")
+    text = re.sub(r"\(.*?\)", " ", text)
+    text = re.sub(r"\[|\]", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def normalize_vendor_text(vendor_text: str) -> str:
     normalized = infer_vendor_from_name(vendor_text)
     if normalized != UNAVAILABLE:
@@ -313,6 +325,35 @@ def update_linux_vram_from_nvidia_smi(gpus: List[Dict[str, Any]]) -> List[Dict[s
         gpu["vram_bytes"] = detected_gpu["vram_bytes"]
         gpu["vram"] = detected_gpu["vram"]
         used_detected[matched_index] = True
+
+    unmatched_detected = [i for i, used in enumerate(used_detected) if not used]
+    unmatched_merged = [
+        i for i, gpu in enumerate(merged)
+        if gpu.get("vendor") == "NVIDIA" and gpu.get("vram_bytes") is None
+    ]
+
+    if len(unmatched_detected) == 1 and len(unmatched_merged) == 1:
+        detected_gpu = detected[unmatched_detected[0]]
+        target_gpu = merged[unmatched_merged[0]]
+        target_gpu["name"] = detected_gpu["name"]
+        target_gpu["vram_bytes"] = detected_gpu["vram_bytes"]
+        target_gpu["vram"] = detected_gpu["vram"]
+        used_detected[unmatched_detected[0]] = True
+    else:
+        merged_key_map = {
+            normalize_gpu_match_key(str(merged[index].get("name", ""))): index
+            for index in unmatched_merged
+        }
+        for index in unmatched_detected:
+            detected_gpu = detected[index]
+            key = normalize_gpu_match_key(str(detected_gpu.get("name", "")))
+            target_index = merged_key_map.get(key)
+            if target_index is None:
+                continue
+            merged[target_index]["name"] = detected_gpu["name"]
+            merged[target_index]["vram_bytes"] = detected_gpu["vram_bytes"]
+            merged[target_index]["vram"] = detected_gpu["vram"]
+            used_detected[index] = True
 
     for index, detected_gpu in enumerate(detected):
         if not used_detected[index]:
